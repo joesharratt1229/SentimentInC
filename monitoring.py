@@ -223,31 +223,83 @@ def introduce_drift(X, drift_type='mean', feature_idx=0, drift_magnitude=1.0):
     
     return X_drift
 
-def compute_target_with_true_relationship(X_drift, noise_level=0.2):
+def compute_target_with_true_relationship(X_drift, original_X, original_y, drift_type, drift_magnitude, concept_drift=0.3):
     """
-    Compute the target variable based on the true underlying relationship.
-    This simulates what would happen in reality if the feature distribution changed.
+    Compute the target variable for drifted data that simulates a realistic scenario
+    where distribution drift leads to performance degradation.
     
     Parameters:
     -----------
     X_drift: pandas DataFrame
         Feature data with drift applied
-    noise_level: float, optional (default=0.2)
-        Level of noise to add to the relationship
+    original_X: pandas DataFrame
+        Original feature data (before drift)
+    original_y: numpy array
+        Original target values
+    drift_type: str
+        Type of drift applied to the data
+    drift_magnitude: float
+        Magnitude of the applied drift
+    concept_drift: float, optional (default=0.3)
+        Amount of concept drift to introduce (0 = no concept drift, 1 = complete concept drift)
     
     Returns:
     --------
     y_drift: numpy array
-        Target variable based on the true relationship with the drifted features
+        Target variable for the drifted data
     """
-    # Use the same relationship as in the generate_data function
-    logit = (1.5 * X_drift['feature_0'] - 
-             0.8 * X_drift['feature_1'] + 
-             0.5 * X_drift['feature_2'] + 
-             noise_level * np.random.normal(size=len(X_drift)))
+    # Make a copy of the original target
+    y_drift = original_y.copy()
     
-    prob = 1 / (1 + np.exp(-logit))
-    y_drift = (prob > 0.5).astype(int)
+    # Calculate a "drift impact" - higher means more impact on the target relationship
+    # This ensures that as PSI increases, the prediction task becomes harder
+    drift_impact = min(drift_magnitude * concept_drift, 0.8)
+    
+    # Different drift types affect the target-feature relationship differently
+    if drift_type == 'mean':
+        # For mean shift, introduce some misclassifications that increase with drift magnitude
+        noise = np.random.random(size=len(y_drift))
+        flip_mask = noise < drift_impact
+        y_drift[flip_mask] = 1 - y_drift[flip_mask]  # Flip labels for some percentage
+        
+    elif drift_type == 'variance':
+        # For variance change, make confident predictions less reliable
+        noise = np.random.random(size=len(y_drift))
+        flip_probability = (X_drift['feature_0'] - X_drift['feature_0'].mean()).abs() / X_drift['feature_0'].std()
+        flip_probability = flip_probability / flip_probability.max() * drift_impact
+        flip_mask = noise < flip_probability
+        y_drift[flip_mask] = 1 - y_drift[flip_mask]
+        
+    elif drift_type in ['skew', 'bimodal']:
+        # For shape changes, introduce region-specific errors
+        feature_values = X_drift['feature_0']
+        
+        # Calculate thresholds to separate regions of the distribution
+        median = feature_values.median()
+        q1 = feature_values.quantile(0.25)
+        q3 = feature_values.quantile(0.75)
+        
+        # Introduce errors in different regions
+        if drift_type == 'skew':
+            # For skewed data, affect the tail more heavily
+            tail_mask = feature_values > q3
+            noise = np.random.random(size=len(y_drift))
+            flip_proba = np.zeros(len(y_drift))
+            flip_proba[tail_mask] = drift_impact
+            flip_mask = noise < flip_proba
+            y_drift[flip_mask] = 1 - y_drift[flip_mask]
+            
+        elif drift_type == 'bimodal':
+            # For bimodal, create inconsistent regions
+            mode1_mask = feature_values < q1
+            mode2_mask = feature_values > q3
+            mid_mask = ~(mode1_mask | mode2_mask)
+            
+            noise = np.random.random(size=len(y_drift))
+            flip_proba = np.zeros(len(y_drift))
+            flip_proba[mid_mask] = drift_impact
+            flip_mask = noise < flip_proba
+            y_drift[flip_mask] = 1 - y_drift[flip_mask]
     
     return y_drift
 
@@ -437,8 +489,13 @@ def experiment_with_different_drift_levels(drift_type='mean', feature_idx=0, n_d
             if drift_mag in [drift_magnitudes[0], drift_magnitudes[len(drift_magnitudes)//2], drift_magnitudes[-1]]:
                 distributions[f'drift_{drift_mag:.1f}'] = X_drift[feature_name].values
         
-        # Generate new target values using the true relationship
-        y_drift = compute_target_with_true_relationship(X_drift)
+        # Generate new target values that simulate the effect of distribution drift on target relationship
+        # This will ensure performance degradation as drift increases
+        y_drift = compute_target_with_true_relationship(
+            X_drift, X_val, y_val, 
+            drift_type=drift_type, 
+            drift_magnitude=drift_mag
+        )
         
         # Apply the same scaling to drifted data
         X_drift_scaled = scaler.transform(X_drift)
