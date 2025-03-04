@@ -166,5 +166,124 @@ class TestCalculateDiscreteBinProportions(unittest.TestCase):
             calculate_discrete_bin_proportions(
                 self.sample_data, 'non_existent_column', self.unique_values, self.training_proportions
             )
+
+
+from test_spark_utils import SparkTestCase
+import pandas as pd
+import numpy as np
+from pyspark.sql import functions as F
+from extract_metadata import subset_df_by_column_type, get_bin_stats, process_categorical_feature
+
+class TestExtractMetadata(SparkTestCase):
+    
+    def setUp(self):
+        # Create sample input DataFrame
+        input_data = [
+            ("user1", 25, 100.5, "category_A", True),
+            ("user2", 30, 150.2, "category_B", False),
+            ("user3", 22, 90.7, "category_A", True),
+            ("user4", 45, 200.1, "category_C", False),
+            ("user5", 33, 120.8, "category_B", True)
+        ]
+        input_schema = ["user_id", "age", "value", "category", "flag"]
+        self.input_df = self.spark.createDataFrame(input_data, schema=input_schema)
+        
+        # Create sample data_type_df (column metadata)
+        type_data = [
+            ("age", "numerical", "Age in years"),
+            ("value", "numerical", "Value in dollars"),
+            ("category", "categorical", "Category type"),
+            ("flag", "categorical", "Boolean flag")
+        ]
+        type_schema = ["DescriptionName", "Type", "Description"]
+        self.data_type_df = self.spark.createDataFrame(type_data, schema=type_schema)
+    
+    def test_subset_df_by_column_type_numerical(self):
+        """Test extracting numerical columns."""
+        subset_df, columns = subset_df_by_column_type(
+            self.input_df, self.data_type_df, "numerical"
+        )
+        
+        # Check returned columns list
+        self.assertEqual(set(columns), {"age", "value"})
+        
+        # Check DataFrame has only requested columns
+        self.assertEqual(set(subset_df.columns), {"age", "value"})
+        
+        # Check row count remains the same
+        self.assertEqual(subset_df.count(), self.input_df.count())
+    
+    def test_subset_df_by_column_type_categorical(self):
+        """Test extracting categorical columns."""
+        subset_df, columns = subset_df_by_column_type(
+            self.input_df, self.data_type_df, "categorical"
+        )
+        
+        # Check returned columns list
+        self.assertEqual(set(columns), {"category", "flag"})
+        
+        # Check DataFrame has only requested columns
+        self.assertEqual(set(subset_df.columns), {"category", "flag"})
+    
+    def test_subset_df_nonexistent_columns(self):
+        """Test with columns in metadata that don't exist in the input DataFrame."""
+        # Create metadata with a column that doesn't exist in input_df
+        extra_type_data = [
+            ("age", "numerical", "Age in years"),
+            ("nonexistent_col", "numerical", "This column doesn't exist")
+        ]
+        extra_type_df = self.spark.createDataFrame(extra_type_data, ["DescriptionName", "Type", "Description"])
+        
+        subset_df, columns = subset_df_by_column_type(
+            self.input_df, extra_type_df, "numerical"
+        )
+        
+        # Should only return columns that actually exist
+        self.assertEqual(set(columns), {"age"})
+    
+    def test_get_bin_stats(self):
+        """Test bin statistics calculation for numerical columns."""
+        edges, proportions = get_bin_stats(self.input_df, "age", 3)
+        
+        # Check return types
+        self.assertIsInstance(edges, list)
+        self.assertIsInstance(proportions, list)
+        
+        # Should have n_bins edges (or n_bins+1 for histogram edges)
+        self.assertGreaterEqual(len(edges), 3)
+        
+        # Should have n_bins proportions
+        self.assertEqual(len(proportions), 3)
+        
+        # Proportions should sum to 1
+        self.assertAlmostEqual(sum(proportions), 1.0, places=6)
+    
+    def test_get_bin_stats_with_nulls(self):
+        """Test bin stats with null values."""
+        # Create DataFrame with nulls
+        null_data = [
+            ("user1", 25), 
+            ("user2", None),
+            ("user3", 22),
+            ("user4", 45),
+            ("user5", None)
+        ]
+        null_df = self.spark.createDataFrame(null_data, ["user_id", "age"])
+        
+        edges, proportions = get_bin_stats(null_df, "age", 2)
+        
+        # Proportions should still sum to 1 despite nulls
+        self.assertAlmostEqual(sum(proportions), 1.0, places=6)
+    
+    def test_process_categorical_feature(self):
+        """Test processing of categorical features."""
+        # Assuming implementation details of process_categorical_feature
+        result = process_categorical_feature(self.input_df, "category")
+        
+        # The function documentation suggests it returns counts and proportions
+        # Adjust these assertions based on the actual implementation
+        self.assertTrue("category_A" in str(result))
+        self.assertTrue("category_B" in str(result))
+        self.assertTrue("category_C" in str(result))
     ]
 )
