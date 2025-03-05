@@ -1,64 +1,40 @@
-import pandas as pd
-import pandera as pa
-from pandera import Column, DataFrameSchema, Check
-import pytest
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, validator, Field
+from typing import List
 
-# Define your schema
-customer_schema = DataFrameSchema(
-    {
-        "customer_id": Column(
-            pa.String, 
-            checks=[Check(lambda x: x.str.startswith("C"), "ID must start with C")],
-            nullable=False
-        ),
-        "age": Column(
-            pa.Int,
-            checks=[Check(lambda x: x >= 18, "Customers must be 18 or older")],
-            nullable=False
-        )
-    }
-)
+app = FastAPI()
 
-# Function to validate
-def process_customer_data(df):
-    """Process customer data, assuming it meets the schema requirements."""
-    return customer_schema(df)
+# Pydantic model for request validation
+class SalesItem(BaseModel):
+    product_id: str = Field(..., description="Product identifier")
+    quantity: int = Field(..., gt=0, description="Quantity ordered")
+    price: float = Field(..., gt=0, description="Price per unit")
+    customer_id: str = Field(..., description="Customer identifier")
+    
+    # Custom validator
+    @validator('product_id')
+    def validate_product_id(cls, value):
+        if not value.startswith('P'):
+            raise ValueError('Product ID must start with P')
+        return value
+    
+    # Custom validator for multiple fields
+    @validator('quantity', 'price')
+    def validate_total_value(cls, value, values):
+        if 'quantity' in values and 'price' in values:
+            if values['quantity'] * values['price'] > 10000:
+                raise ValueError('Total order value exceeds maximum limit')
+        return value
 
-# Test cases
-def test_valid_data_passes():
-    """Test that valid data passes validation."""
-    valid_df = pd.DataFrame({
-        "customer_id": ["C001", "C002", "C003"],
-        "age": [25, 30, 42]
-    })
+# API endpoint with validation
+@app.post("/sales/")
+async def process_sales(items: List[SalesItem]):
+    # Process validated sales data
+    processed_items = []
+    for item in items:
+        processed_item = item.dict()
+        processed_item["total"] = item.quantity * item.price
+        processed_item["tax"] = processed_item["total"] * 0.08
+        processed_items.append(processed_item)
     
-    # This should not raise an exception
-    result = process_customer_data(valid_df)
-    assert isinstance(result, pd.DataFrame)
-    assert len(result) == 3
-
-def test_invalid_customer_id_format():
-    """Test that invalid customer ID format raises SchemaError."""
-    invalid_df = pd.DataFrame({
-        "customer_id": ["D001", "C002", "C003"],  # D001 is invalid
-        "age": [25, 30, 42]
-    })
-    
-    # Using pytest's context manager to check for exception
-    with pytest.raises(pa.errors.SchemaError) as excinfo:
-        process_customer_data(invalid_df)
-    
-    # Check that the error message mentions the specific issue
-    assert "ID must start with C" in str(excinfo.value)
-
-def test_underage_customers():
-    """Test that underage customers raise SchemaError."""
-    invalid_df = pd.DataFrame({
-        "customer_id": ["C001", "C002", "C003"],
-        "age": [25, 17, 42]  # 17 is underage
-    })
-    
-    with pytest.raises(pa.errors.SchemaError) as excinfo:
-        process_customer_data(invalid_df)
-    
-    assert "Customers must be 18 or older" in str(excinfo.value)
+    return {"status": "success", "processed_items": processed_items}
