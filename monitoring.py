@@ -1,52 +1,64 @@
+import pandas as pd
 import pandera as pa
 from pandera import Column, DataFrameSchema, Check
+import pytest
 
-# Define a single schema that all transaction data must conform to
-transaction_schema = DataFrameSchema(
+# Define your schema
+customer_schema = DataFrameSchema(
     {
         "customer_id": Column(
             pa.String, 
             checks=[Check(lambda x: x.str.startswith("C"), "ID must start with C")],
             nullable=False
         ),
-        "amount": Column(
-            pa.Float,
-            checks=[
-                Check(lambda x: x >= 0, "Amount must be non-negative"),
-            ],
-            coerce=True,  # Try to convert to float if possible
-            nullable=False
-        ),
-        "transaction_date": Column(
-            pa.DateTime,  # Will standardize different date formats
-            coerce=True,
+        "age": Column(
+            pa.Int,
+            checks=[Check(lambda x: x >= 18, "Customers must be 18 or older")],
             nullable=False
         )
     }
 )
 
-# Define a processing pipeline using the schema
-@pa.check_types
-def process_transactions(df: pa.typing.DataFrame[transaction_schema]) -> pd.DataFrame:
-    # At this point, we know the data is valid and properly formatted
-    # We can focus on actual business logic
-    return df.assign(
-        month=df["transaction_date"].dt.month,
-        year=df["transaction_date"].dt.year
-    )
+# Function to validate
+def process_customer_data(df):
+    """Process customer data, assuming it meets the schema requirements."""
+    return customer_schema(df)
 
-# Pre-process the API data to fix the customer_id format
-transactions_api["customer_id"] = "C" + transactions_api["customer_id"].astype(str).str.zfill(3)
+# Test cases
+def test_valid_data_passes():
+    """Test that valid data passes validation."""
+    valid_df = pd.DataFrame({
+        "customer_id": ["C001", "C002", "C003"],
+        "age": [25, 30, 42]
+    })
+    
+    # This should not raise an exception
+    result = process_customer_data(valid_df)
+    assert isinstance(result, pd.DataFrame)
+    assert len(result) == 3
 
-try:
-    # Validate and process each dataset
-    processed_db = process_transactions(transactions_db)
-    processed_api = process_transactions(transactions_api)
+def test_invalid_customer_id_format():
+    """Test that invalid customer ID format raises SchemaError."""
+    invalid_df = pd.DataFrame({
+        "customer_id": ["D001", "C002", "C003"],  # D001 is invalid
+        "age": [25, 30, 42]
+    })
     
-    # Safe to combine now
-    all_transactions = pd.concat([processed_db, processed_api])
-    print("Successfully processed all transactions")
+    # Using pytest's context manager to check for exception
+    with pytest.raises(pa.errors.SchemaError) as excinfo:
+        process_customer_data(invalid_df)
     
-except pa.errors.SchemaError as e:
-    print(f"Validation failed: {e}")
-With Pandera:
+    # Check that the error message mentions the specific issue
+    assert "ID must start with C" in str(excinfo.value)
+
+def test_underage_customers():
+    """Test that underage customers raise SchemaError."""
+    invalid_df = pd.DataFrame({
+        "customer_id": ["C001", "C002", "C003"],
+        "age": [25, 17, 42]  # 17 is underage
+    })
+    
+    with pytest.raises(pa.errors.SchemaError) as excinfo:
+        process_customer_data(invalid_df)
+    
+    assert "Customers must be 18 or older" in str(excinfo.value)
