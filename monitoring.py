@@ -1,75 +1,81 @@
-import os
-import tomli
-import shutil
-from pathlib import Path
+import optuna
+import xgboost as xgb
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import log_loss
 
-def extract_dependencies(pyproject_path, output_dir=None):
-    """
-    Extract dependencies from a Poetry pyproject.toml file and store them
-    in a Python file in a newly created directory.
-    
-    Args:
-        pyproject_path (str): Path to the pyproject.toml file
-        output_dir (str, optional): Directory to store the dependencies. 
-                                    If None, creates 'dependencies_output'
-    
-    Returns:
-        str: Path to the created dependencies.py file
-    """
-    # Set default output directory if not provided
-    if output_dir is None:
-        output_dir = "dependencies_output"
-    
-    # Create output directory if it doesn't exist
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-    
-    # Read and parse the pyproject.toml file
-    with open(pyproject_path, "rb") as f:
-        pyproject_data = tomli.load(f)
-    
-    # Extract dependencies
-    dependencies = []
-    
-    # Check if it's a poetry project
-    if "tool" in pyproject_data and "poetry" in pyproject_data["tool"]:
-        poetry_deps = pyproject_data["tool"]["poetry"].get("dependencies", {})
-        
-        # Process each dependency
-        for package, constraint in poetry_deps.items():
-            # Skip python dependency
-            if package.lower() == "python":
-                continue
-                
-            if isinstance(constraint, str):
-                # Simple version constraint
-                dependencies.append(f"{package}=={constraint}")
-            elif isinstance(constraint, dict):
-                # Complex version constraint
-                if "version" in constraint:
-                    dependencies.append(f"{package}=={constraint['version']}")
-                else:
-                    # If no specific version, just include the package name
-                    dependencies.append(package)
-    
-    # Create a Python file with the dependencies list
-    output_file = os.path.join(output_dir, "dependencies.py")
-    with open(output_file, "w") as f:
-        f.write(f"dependencies = {repr(dependencies)}\n")
-    
-    # Copy the pyproject.toml file to the output directory for reference
-    shutil.copy2(pyproject_path, os.path.join(output_dir, "pyproject.toml"))
-    
-    return output_file
+def objective(trial):
+    # Hyperparameters to tune
+    params = {
+        "objective": "binary:logistic",
+        "eval_metric": "logloss",  # XGBoost will report log loss after each iteration
+        "eta": trial.suggest_float("eta", 1e-3, 1e-1, log=True),
+        "max_depth": trial.suggest_int("max_depth", 2, 12),
+        "subsample": trial.suggest_float("subsample", 0.5, 1.0),
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+        "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
+    }
 
-if __name__ == "__main__":
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="Extract dependencies from a Poetry pyproject.toml file")
-    parser.add_argument("pyproject", help="Path to the pyproject.toml file")
-    parser.add_argument("--output", "-o", help="Output directory (default: dependencies_output)")
-    
-    args = parser.parse_args()
-    
-    result = extract_dependencies(args.pyproject, args.output)
-    print(f"Dependencies extracted to {result}")
+    # Create DMatrix for XGBoost
+    dtrain = xgb.DMatrix(X_train, label=y_train)
+    dvalid = xgb.DMatrix(X_valid, label=y_valid)
+
+    # Train model with a high num_boost_round and early stopping
+    booster = xgb.train(
+        params,
+        dtrain,
+        num_boost_round=1000,
+        evals=[(dvalid, "validation")],
+        early_stopping_rounds=50,
+        verbose_eval=False
+    )
+
+    # Predict probabilities on the validation set
+    preds_proba = booster.predict(dvalid)
+
+    # Compute the log loss on the validation data
+    val_log_loss = log_loss(y_valid, preds_proba)
+
+    # If we want to minimize log loss, we can either:
+    #   1) Return val_log_loss and set direction="minimize" in the study
+    #   2) Return -val_log_loss and set direction="maximize" (less common, but possible)
+    return val_log_loss
+
+# Load data
+data = load_breast_cancer()
+X, y = data.data, data.target
+
+# Train/validation split
+X_train, X_valid, y_train, y_valid = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+
+# Create the Optuna study to MINIMIZE log loss
+study = optuna.create_study(direction="minimize")
+study.optimize(objective, n_trials=50, show_progress_bar=True)
+
+print("Best trial:", study.best_trial.number)
+print("Best hyperparameters:", study.best_params)
+print("Best log loss:", study.best_value)
+
+# Retrain final model with the best hyperparameters
+best_params = study.best_params
+best_params["objective"] = "binary:logistic"
+best_params["eval_metric"] = "logloss"
+
+dtrain = xgb.DMatrix(X_train, label=y_train)
+dvalid = xgb.DMatrix(X_valid, label=y_valid)
+
+final_booster = xgb.train(
+    best_params,
+    dtrain,
+    num_boost_round=1000,
+    evals=[(dvalid, "validation")],
+    early_stopping_rounds=50,
+    verbose_eval=False
+)
+
+# Evaluate final model
+preds_proba = final_booster.predict(dvalid)
+final_log_loss = log_loss(y_valid, preds_proba)
+print("Final model log loss:", final_log_loss)
